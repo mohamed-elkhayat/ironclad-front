@@ -103,6 +103,8 @@ button:focus-visible { outline: 2px solid var(--amber); outline-offset: 1px; }
 .diff button:disabled { opacity: .45; cursor: not-allowed; }
 .diff button.join { border-color: var(--ok); }
 .note.warn { color: var(--amber); }
+.invite { display: flex; flex-direction: column; gap: 8px; }
+.invite input { width: 100%; min-width: 0; background: var(--panel2); border: 1px solid var(--line); color: var(--text); font-family: var(--ui); font-size: 13px; padding: 8px 10px; }
 .note .reason { display: block; margin-top: 4px; color: var(--dim); font-size: 11px; }
 #liveBtn { border-color: var(--amber); }
 .live { color: var(--ok); }
@@ -388,6 +390,7 @@ function newGame(diff, opts = {}) {
   $('mpTag').hidden = !G.mp; renderMpTag();
   $('bPause').disabled = !!G.mp;
   updateVis(); buildPanel(); renderMsgs();
+  if (matchMedia('(pointer: coarse)').matches) useTouchUI();
   msg(G.client ? 'You command the Syndicate. Destroy the Vanguard base.' : 'Commander, establish the base. Power first, then a refinery.');
 }
 
@@ -1529,7 +1532,8 @@ const rname = s => 'ic-' + MP.gid.toLowerCase() + '-' + s;
 // Connects to the live room. Returns true once this screen can play two-player.
 async function initRoom() {
   MP.checked = false; MP.reason = '';
-  if (!window.claude || typeof window.claude.use !== 'function') { mpUnavailable('outside'); return false; }
+  if (!window.claude || typeof window.claude.use !== 'function') { MP.net = 'p2p'; MP.ok = true; MP.checked = true; renderOpenGames(); return true; }
+  MP.net = 'room';
   try {
     MP.perms = MP.perms || await window.claude.use('permissions').catch(() => null);
     if (MP.perms) MP.perm = await MP.perms.state('room').catch(() => '');
@@ -1574,7 +1578,8 @@ function renderOpenGames() {
       note.append(why + ' ');
       if (MP.reason === 'outside') { note.append('Open the game from its claude.ai link to play with a friend.'); }
       else {
-      const how = document.createElement('span'); how.textContent = 'Tap the button to allow it. If it still fails, the host should invite this account by email with the Share button (a public “anyone with the link” share only allows solo play), and this page must be opened while signed in to that account.'; note.append(how);
+      const how = document.createElement('span'); how.textContent = 'Tap the button to allow it. If it still fails, both players can use the hosted version instead, which works with any link: '; note.append(how);
+      const a = document.createElement('a'); a.href = PAGES_URL; a.target = '_blank'; a.rel = 'noopener'; a.textContent = PAGES_URL.replace('https://', ''); a.style.color = 'var(--ok)'; note.append(a);
       const r = document.createElement('span'); r.className = 'reason'; r.textContent = ' Reason: ' + (MP.reason || 'unknown') + (MP.perm ? ' · permission: ' + MP.perm : ''); note.append(r);
       }
     }
@@ -1583,6 +1588,14 @@ function renderOpenGames() {
     return;
   }
   host.disabled = false; jb.disabled = false;
+  if (MP.net === 'p2p') {
+    note.className = 'note';
+    note.innerHTML = '<b class="live">●</b> Online play. Host a match and send your friend the invite link, or type the code your friend gives you.';
+    list.innerHTML = '';
+    const inv = inviteCode();
+    if (inv) { const b = document.createElement('button'); b.className = 'join'; b.innerHTML = '<b></b><span>From your invite link · you play the Syndicate</span>'; b.querySelector('b').textContent = 'Join match ' + inv; b.onclick = () => joinMatch(inv); list.append(b); }
+    return;
+  }
   const games = MP.room.peers().filter(p => !p.sameTab && p.presence && typeof p.presence.host === 'string' && /^[A-Z0-9]{4}$/.test(p.presence.host));
   note.className = 'note';
   note.innerHTML = games.length ? '<b class="live">●</b> Connected. A friend is waiting for you:' : '<b class="live">●</b> Connected. Host a match, or type the code your friend gives you. Open matches also appear here.';
@@ -1600,9 +1613,13 @@ async function leaveMP() {
   MP.lastSeq = 0; MP.cmdSeq = 0; MP.cmds = []; MP.seenChunk = []; MP.seenOre = []; MP.lastMeta = null; MP.oreStr = ['', ''];
   if (MP.room) MP.room.presence({ host: null }).catch(() => {});
   for (const r of rooms) r.leave().catch(() => {});
+  const conn = MP.conn, peer = MP.peer; MP.conn = null; MP.peer = null;
+  try { conn && conn.close(); } catch (_) {}
+  try { peer && peer.destroy(); } catch (_) {}
 }
 async function hostMatch() {
   if (!MP.ok) return; SFX.init();
+  if (MP.net === 'p2p') return hostP2P();
   await leaveMP();
   MP.role = 'host'; MP.gid = randCode();
   showWaiting();
@@ -1620,9 +1637,11 @@ function onMetaPeersHost(ch) {
     if (!MP.guestPeer && !G && !MP.starting) { MP.guestPeer = p.peer; startHostGame(); }
     if (p.peer === MP.guestPeer && G && G.mp === 'host') readCmds(p.presence.cmds);
   }
-  for (const p of ch.left) if (p.peer === MP.guestPeer && G && G.mp === 'host' && !G.over) {
-    MP.guestPeer = null; G.aiOn = true; G.ai.nextWave = G.t + 60; msg('Your friend left. The AI now commands the Syndicate.', true); renderMpTag();
-  }
+  for (const p of ch.left) if (p.peer === MP.guestPeer) friendLeft();
+}
+function friendLeft() {
+  if (!G || G.mp !== 'host' || G.over || G.aiOn) return;
+  MP.guestPeer = null; G.aiOn = true; G.ai.nextWave = G.t + 60; msg('Your friend left. The AI now commands the Syndicate.', true); renderMpTag();
 }
 async function startHostGame() {
   MP.starting = true;
@@ -1633,6 +1652,104 @@ async function startHostGame() {
   MP.room.presence({ host: null }).catch(() => {});
   ME = 0; ov.hidden = true; newGame('normal', { mp: 'host' }); MP.starting = false;
   hostSend(true);
+}
+// ---- peer-to-peer (used outside claude.ai, e.g. on GitHub Pages) ----
+// The two browsers talk directly over WebRTC. The free PeerJS server only introduces them.
+const PAGES_URL = 'https://mohamed-elkhayat.github.io/ironclad-front/';
+const PEER_PREFIX = 'ironclad-front-';
+const ICE = { iceServers: [
+  { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
+  { urls: 'stun:global.stun.twilio.com:3478' },
+  { urls: ['turn:openrelay.metered.ca:80', 'turn:openrelay.metered.ca:443', 'turn:openrelay.metered.ca:443?transport=tcp'], username: 'openrelayproject', credential: 'openrelayproject' },
+] };
+let peerLib = null;
+function loadPeerJS() {
+  if (window.Peer) return Promise.resolve(window.Peer);
+  if (peerLib) return peerLib;
+  peerLib = new Promise((res, rej) => {
+    const sc = document.createElement('script'); sc.src = 'https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js'; sc.async = true;
+    sc.onload = () => window.Peer ? res(window.Peer) : rej(new Error('PeerJS missing'));
+    sc.onerror = () => { peerLib = null; rej(new Error('Could not load the connection library')); };
+    document.head.append(sc);
+  });
+  return peerLib;
+}
+function openPeer(id) {
+  return loadPeerJS().then(Peer => new Promise((res, rej) => {
+    const p = id ? new Peer(id, { config: ICE, debug: 0 }) : new Peer({ config: ICE, debug: 0 });
+    const t = setTimeout(() => { try { p.destroy(); } catch (_) {} rej({ type: 'timeout' }); }, 15000);
+    p.once('open', () => { clearTimeout(t); res(p); });
+    p.once('error', e => { clearTimeout(t); try { p.destroy(); } catch (_) {} rej(e); });
+  }));
+}
+function inviteCode() { const m = /^#join-([A-Za-z0-9]{4})$/.exec(location.hash); return m ? m[1].toUpperCase() : null; }
+function inviteLink() { return location.origin + location.pathname + '#join-' + MP.gid; }
+async function hostP2P() {
+  await leaveMP();
+  MP.role = 'host';
+  showConnecting('Opening a match…');
+  let peer = null;
+  for (let i = 0; i < 4 && !peer; i++) {
+    MP.gid = randCode();
+    try { peer = await openPeer(PEER_PREFIX + MP.gid.toLowerCase()); }
+    catch (e) { if (!e || e.type !== 'unavailable-id') { mpLost(p2pError(e)); return; } }
+  }
+  if (!peer) { mpLost('Could not open a match. Try again.'); return; }
+  if (MP.role !== 'host') { peer.destroy(); return; }
+  MP.peer = peer;
+  peer.on('disconnected', () => { try { if (MP.peer === peer && !peer.destroyed) peer.reconnect(); } catch (_) {} });
+  peer.on('error', e => { if (MP.peer === peer && !G) mpLost(p2pError(e)); });
+  peer.on('connection', conn => {
+    if (MP.conn || G) { conn.on('open', () => { try { conn.send({ t: 'full' }); } catch (_) {} setTimeout(() => conn.close(), 600); }); return; }
+    MP.conn = conn;
+    conn.on('open', () => { if (MP.conn !== conn) return; MP.guestPeer = conn.peer; MP.lastHeard = performance.now(); ME = 0; ov.hidden = true; newGame('normal', { mp: 'host' }); try { conn.send({ t: 'hello', seed: G.seed }); } catch (_) {} hostSend(true); });
+    conn.on('data', d => { if (MP.conn !== conn || !d) return; MP.lastHeard = performance.now(); if (d.t === 'c' && G && G.mp === 'host') readCmds(d.cmds); });
+    conn.on('close', () => { if (MP.conn === conn) { MP.conn = null; friendLeft(); } });
+    conn.on('error', () => {});
+  });
+  showWaiting();
+}
+async function joinP2P(gid) {
+  await leaveMP();
+  MP.role = 'guest'; MP.gid = gid;
+  showJoining();
+  let peer;
+  try { peer = await openPeer(null); } catch (e) { mpLost(p2pError(e)); return; }
+  if (MP.role !== 'guest' || MP.gid !== gid) { peer.destroy(); return; }
+  MP.peer = peer;
+  peer.on('error', e => { if (MP.peer !== peer) return; if (e && e.type === 'peer-unavailable') mpLost('No open match has the code ' + gid + '. Check the code with your friend and make sure their screen still says “Waiting for your friend”.'); else if (!G) mpLost(p2pError(e)); });
+  peer.on('disconnected', () => { try { if (MP.peer === peer && !peer.destroyed) peer.reconnect(); } catch (_) {} });
+  const conn = peer.connect(PEER_PREFIX + gid.toLowerCase(), { reliable: true, serialization: 'json' });
+  MP.conn = conn;
+  conn.on('data', d => {
+    if (MP.conn !== conn || !d) return;
+    MP.lastHeard = performance.now();
+    if (d.t === 'full') { mpLost('That match already has two players.'); return; }
+    if (d.t === 'hello' && Number.isFinite(d.seed) && !G) { ME = 1; ov.hidden = true; newGame('normal', { mp: 'guest', seed: d.seed }); return; }
+    if (d.t === 's' && G && G.client) {
+      if (Array.isArray(d.e)) d.e.forEach((c, k) => applyChunk(k, c));
+      if (Array.isArray(d.o)) { applyOre(0, d.o[0]); applyOre(1, d.o[1]); }
+      if (d.m) applyMeta(d.m);
+    }
+  });
+  conn.on('close', () => { if (MP.conn === conn) { MP.conn = null; if (G && G.client && !G.over) hostLeft(); } });
+  setTimeout(() => { if (MP.conn === conn && !G) mpLost('Could not reach match ' + gid + '. Make sure your friend’s screen still says “Waiting for your friend”. If one of you is on mobile data, try Wi-Fi: some mobile networks block direct connections.'); }, 20000);
+}
+// heartbeat: each side pings; silence for 12 s means the other browser is gone
+setInterval(() => {
+  if (MP.net !== 'p2p' || !MP.conn || !G || G.over) return;
+  if (G.client) { try { MP.conn.open && MP.conn.send({ t: 'p' }); } catch (_) {} }
+  if (MP.lastHeard && performance.now() - MP.lastHeard > 12000) {
+    const c = MP.conn; MP.conn = null; try { c.close(); } catch (_) {}
+    if (G.client) hostLeft(); else friendLeft();
+  }
+}, 2000);
+function p2pError(e) {
+  const t = e && e.type;
+  if (t === 'network' || t === 'server-error' || t === 'socket-error' || t === 'timeout') return 'Could not reach the connection server. Check your internet connection and try again.';
+  if (t === 'browser-incompatible') return 'This browser cannot make direct connections. Try the latest Chrome, Safari or Firefox.';
+  if (e && e.message) return e.message;
+  return 'The connection failed (' + (t || 'error') + '). Try again.';
 }
 function readCmds(cmds) {
   if (!Array.isArray(cmds)) return;
@@ -1647,10 +1764,10 @@ function encodeEnt(e) {
     ? [e.id, c, e.tx, e.ty, Math.ceil(e.hp), 0, qa(e.tdir), e.fires, tg, Math.round(e.built * 10)]
     : [e.id, c, Math.round(e.x), Math.round(e.y), Math.ceil(e.hp), qa(e.dir), qa(e.tdir), e.fires, tg, Math.round(e.load || 0)];
 }
-function encodeOre(half) {
+function encodeOre(half, full) {
   const parts = [], a = half * NN / 2, b = a + NN / 2;
   for (let i = a; i < b; i++) if (ore[i] >= 1) parts.push((i - a).toString(36) + '.' + Math.max(1, Math.round(ore[i] / 10)).toString(36));
-  let s = parts.join(','); if (s.length > 3900) s = s.slice(0, s.lastIndexOf(',', 3900));
+  let s = parts.join(','); if (!full && s.length > 3900) s = s.slice(0, s.lastIndexOf(',', 3900));
   return s;
 }
 function hostMeta() {
@@ -1658,8 +1775,16 @@ function hostMeta() {
   return { t: Math.round(G.t * 10) / 10, cr: Math.floor(tm.credits), q: ['bld', 'inf', 'veh'].map(k => tm.q[k].slice(0, 8).map(i => [i.type, Math.floor(i.paid)])), rd: tm.ready, ra: tm.rally, ms: G.rmsgs, ov: G.winner, st: G.stats[1], ai: G.aiOn ? 1 : 0, ls: MP.lastSeq };
 }
 function hostSend(force) {
-  if (!MP.meta || !MP.er.length) return;
   const chunks = Array.from({ length: EK }, () => []);
+  if (MP.net === 'p2p') {
+    if (!MP.conn || !MP.conn.open) return;
+    for (const e of G.ents) if (!e.dead) chunks[e.id % EK].push(encodeEnt(e));
+    const m = { t: 's', e: chunks, m: hostMeta() };
+    if (force || ++MP.oreN % 4 === 0) { const o = [encodeOre(0, true), encodeOre(1, true)]; if (force || o[0] !== MP.oreStr[0] || o[1] !== MP.oreStr[1]) { MP.oreStr = o; m.o = o; } }
+    try { MP.conn.send(m); } catch (_) {}
+    return;
+  }
+  if (!MP.meta || !MP.er.length) return;
   for (const e of G.ents) if (!e.dead) chunks[e.id % EK].push(encodeEnt(e));
   chunks.forEach((c, k) => { while (JSON.stringify(c).length > 3800) c.pop(); MP.er[k].presence({ e: c }).catch(() => {}); });
   MP.meta.presence({ role: 'host', gid: MP.gid, state: G.over ? 'over' : 'play', seed: G.seed, m: hostMeta() }).catch(() => {});
@@ -1667,6 +1792,7 @@ function hostSend(force) {
 }
 async function joinMatch(gid) {
   if (!MP.ok || !/^[A-Z0-9]{4}$/.test(gid)) return; SFX.init();
+  if (MP.net === 'p2p') return joinP2P(gid);
   await leaveMP();
   MP.role = 'guest'; MP.gid = gid;
   showJoining();
@@ -1706,6 +1832,7 @@ async function startGuestGame(seed) {
 }
 function mpSendCmd(c) {
   MP.cmds.push([++MP.cmdSeq, ...c]); if (MP.cmds.length > 8) MP.cmds.shift();
+  if (MP.net === 'p2p') { try { MP.conn && MP.conn.open && MP.conn.send({ t: 'c', cmds: MP.cmds }); } catch (_) {} return; }
   let send = MP.cmds; while (JSON.stringify(send).length > 3500 && send.length > 1) send = send.slice(1);
   if (MP.meta) MP.meta.presence({ role: 'guest', gid: MP.gid, cmds: send }).catch(() => {});
 }
@@ -1778,7 +1905,7 @@ function clientUpdate(dt) {
 function hostLeft() {
   G.over = true;
   ov.hidden = false;
-  ov.innerHTML = `<div class="card"><span class="kick">Connection closed</span><h1 style="color:var(--bad)">Host left</h1><p>The host closed the match, so the battle ended.</p><div class="diff"><button id="again"><b>Back to menu</b><span>Start a new battle</span></button></div></div>`;
+  ov.innerHTML = `<div class="card"><span class="kick">Connection closed</span><h1 style="color:var(--bad)">Host left</h1><p>The host closed the match or lost their connection, so the battle ended. On phones, switching to another app can drop the match, so the host should keep the game in front.</p><div class="diff"><button id="again"><b>Back to menu</b><span>Start a new battle</span></button></div></div>`;
   $('again').onclick = () => { leaveMP(); showStart(); };
 }
 function mpLost(text) {
@@ -1836,6 +1963,7 @@ function showStart() {
   ov.querySelectorAll('[data-d]').forEach(b => b.addEventListener('click', () => { SFX.init(); leaveMP(); ME = 0; ov.hidden = true; newGame(b.dataset.d); if (matchMedia('(pointer: coarse)').matches) useTouchUI(); }));
   $('hostBtn').onclick = hostMatch;
   const jc = $('joinCode');
+  if (inviteCode()) jc.value = inviteCode();
   jc.addEventListener('input', () => { jc.value = jc.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 4); });
   $('joinForm').addEventListener('submit', async e => {
     e.preventDefault();
@@ -1856,6 +1984,28 @@ function showWaiting() {
     <div class="diff"><button id="cancelHost"><b>Cancel</b><span>Back to the menu</span></button></div>
   </div>`;
   $('cancelHost').onclick = () => { leaveMP(); showStart(); };
+  if (MP.net === 'p2p') {
+    const link = inviteLink();
+    const box = document.createElement('div'); box.className = 'invite';
+    box.innerHTML = '<span class="lbl">Invite link</span><input id="inviteLink" readonly><div class="diff"><button id="shareBtn"><b>Share link</b><span>Send it in WhatsApp, SMS…</span></button><button id="copyBtn"><b>Copy link</b><span>Paste it to your friend</span></button></div>';
+    ov.querySelector('.code').after(box);
+    $('inviteLink').value = link;
+    ov.querySelector('.card p').textContent = 'Send your friend the invite link. When they open it and tap Join, the battle starts. They can also type the code ' + MP.gid + ' under Two players. You command the Vanguard; they command the Syndicate.';
+    ov.querySelector('.card .note').textContent = 'Keep this tab open and in front while you play, because your browser runs the battle.';
+    const share = $('shareBtn');
+    if (!navigator.share) share.hidden = true;
+    share.onclick = () => navigator.share({ title: 'Ironclad Front', text: 'Join my Ironclad Front match (code ' + MP.gid + ')', url: link }).catch(() => {});
+    $('copyBtn').onclick = () => {
+      const done = () => { $('copyBtn').querySelector('b').textContent = 'Copied'; };
+      try { navigator.clipboard.writeText(link).then(done, () => { $('inviteLink').select(); }); } catch (_) { $('inviteLink').select(); }
+    };
+  }
+}
+function showConnecting(text) {
+  ov.hidden = false;
+  ov.innerHTML = `<div class="card"><span class="kick">Two-player match</span><h1 style="font-size:clamp(32px,7vw,52px)"></h1><div class="diff"><button id="cancelC"><b>Cancel</b><span>Back to the menu</span></button></div></div>`;
+  ov.querySelector('h1').textContent = text;
+  $('cancelC').onclick = () => { leaveMP(); showStart(); };
 }
 function showJoining() {
   ov.hidden = false;

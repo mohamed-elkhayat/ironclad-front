@@ -15,7 +15,15 @@ Or download `index.html` and open it in a browser to play solo offline.
 - You win when every enemy structure and combat unit is destroyed.
 
 ## Two players
-Two-player matches currently work only when the game is opened as a claude.ai artifact. There, one player taps **Host a match** and shares the page link. The friend opens it and taps **Join match XXXX**. The host's browser runs the battle and streams it to the friend over the page's live room, and the friend's orders stream back. If the friend leaves, the AI takes over their side. The friend needs access to the page (use Share to invite them); visitors who aren't signed in can only play solo.
+1. Open the game at https://mohamed-elkhayat.github.io/ironclad-front/ and tap **Host a match**.
+2. Send your friend the invite link (Share or Copy). It looks like `…/ironclad-front/#join-ABCD`.
+3. Your friend opens it and taps **Join match ABCD**, or types the code under **Two players**.
+
+No accounts are needed. The two browsers connect directly (WebRTC); the free PeerJS service only introduces them. The host's browser runs the battle, so the host should keep the game open and in front. If the friend leaves, the AI takes over their side.
+
+Some mobile networks block direct connections. If joining times out, try Wi-Fi on one or both phones.
+
+When the game runs as a claude.ai artifact, it uses claude.ai's live room instead.
 
 ## Phones and tablets
 Tap a unit to select it, then tap the ground to move or an enemy to attack. Drag scrolls the map, and pinching zooms. The on-map buttons cover the rest: **Select** (the next drag box-selects), **Army**, **Attack** (attack-move), **Stop** and **Clear**. To place a building, tap where it goes, then tap the outline again to confirm.
